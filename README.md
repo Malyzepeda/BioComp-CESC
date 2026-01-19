@@ -37,14 +37,3 @@ The goal of the project is to identify and characterize molecular differences be
 - GSEA  
 - k-nearest neighbors (k-NN)
 
----
-
-## Repository Structure
-
-```text
-├── data/               # Processed datasets and metadata
-├── scripts/            # R scripts for analysis
-├── results/            # Tables and figures (DEGs, enrichment, plots)
-├── figures/            # PCA, heatmaps, volcano plots
-├── report/             # RMarkdown / PDF report
-└── README.md
