@@ -1,0 +1,627 @@
+# Project: CERVICAL CANCER
+
+# Squamos vs Adenocarcinoma
+
+## 1. Downloading data
+
+### Installo BiocManager se non presente:
+
+```{r}
+if (!requireNamespace("BiocManager", quietly = TRUE))
+  install.packages("BiocManager")
+```
+
+### Installo recount3, necessario per accedere ai dati TCGA:
+
+```{r}
+BiocManager::install("recount3")
+```
+
+### Carico recount3 R package:
+
+```{r}
+library("recount3")
+```
+
+recount3 permette di accedere facilmente ai dati RNA-Seq normalizzati
+
+### Scarico i dati TCGA per CESC (cervical cancer) (squamoso e adenocarcinoma):
+
+```{r}
+rse <- recount3::create_rse_manual(
+project = "CESC",
+project_home = "data_sources/tcga",
+organism = "human",
+annotation = "gencode_v29",
+type = "gene",
+recount3_url = "https://recount-opendata.s3.amazonaws.com/recount3/release"
+)
+```
+
+### Verifico la informazione del campione per identificare la colonna che ha il tipo di campione:
+
+```{r}
+metadata <- as.data.frame(colData(rse))
+```
+
+1.  Ho identificato la colonna che ha il tipo di campione (tcga.cgc_sample_sample_type)
+2.  Ho identificato la colonna che ha il subtype di campione (tcga.cgc_case_histological_diagnosis)
+
+### Filtro solo campioni tumorali primari (Primary Tumor):
+
+```{r}
+rse <- rse[, rse$tcga.cgc_sample_sample_type == "Primary Tumor" & !is.na(rse$tcga.cgc_sample_sample_type)]
+```
+
+### Filtro solo squamous e adenocarcinoma:
+
+```{r}
+rse <- rse[, rse$tcga.cgc_case_histological_diagnosis %in%
+             c("Cervical Squamous Cell Carcinoma", 
+               "Endocervical Adenocarcinoma of the Usual Type",
+               "Endometrioid Adenocarcinoma of Endocervix",
+               "Mucinous Adenocarcinoma of Endocervical Type",
+               "Endocervical Type of Adenocarcinoma")]
+```
+
+### Carico nuovamente la metadata con i nuovi filtri:
+
+```{r}
+metadata <- as.data.frame(colData(rse))
+```
+
+### Definisco i sottotipi che consideriamo come adenocarcinoma:
+
+```{r}
+adeno_subtypes <- c(
+  "Endocervical Adenocarcinoma of the Usual Type",
+  "Endocervical Type of Adenocarcinoma",
+  "Mucinous Adenocarcinoma of Endocervical Type",
+  "Endometrioid Adenocarcinoma of Endocervix"
+)
+```
+
+### Creo una nuova colonna semplice con i subtype di interesse e li converto in factor:
+
+```{r}
+colData(rse)$subtype <- ifelse(
+  rse$tcga.cgc_case_histological_diagnosis %in% adeno_subtypes,
+  "Adenosquamous",
+  "Squamous"
+)
+
+colData(rse)$subtype <- factor(colData(rse)$subtype)
+```
+
+Creo una colonna 'subtype' più leggibile.
+
+### Vedo il numero totale di campioni:
+
+```{r}
+table(colData(rse)$subtype)
+```
+
+## 2. DESeq2
+
+### Preparazione per DESeq2:
+
+```{r}
+library("DESeq2")
+```
+
+### Creo un oggetto dds (di classe DESeqDataSet) specificando il design del modello (\~ subtype):
+
+```{r}
+dds <- DESeqDataSet(rse, design = ~ subtype)
+```
+
+Questo contiene i dati di espressione genica (dall’oggetto rse) ed associa ad ogni campione un gruppo basato sulla colonna di subtype.
+
+### Rimuovo i geni con zero conteggi in tutti i campioni:
+
+```{r}
+keep <- rowSums(counts(dds)) >= 1
+dds <- dds[keep,]
+```
+
+### Eseguo l'analisi di espressione differenziale con DESeq2:
+
+```{r}
+dds <- DESeq(dds)
+```
+
+L’analisi di espressione genica differenziale è una procedura che uso per identificare i geni che cambiano espressione. DESeq2 stima il fold change (quanto cambia l’espressione di un gene) e il p-value (quanto è probabile che la differenza osservata sia dovuta al caso) per ogni gene.
+
+### Ottengo i risultati:
+
+```{r}
+res <- results(dds, contrast = c("subtype", "Squamous", "Adenosquamous"))
+```
+
+### Visualizza i primi risultati:
+
+```{r}
+head(res)
+```
+
+### Ordino i risultati per lowest p-value e vissualizzo i 5 più significativi:
+
+```{r}
+resOrdered <- res[order(res$pvalue), ]
+head(resOrdered, 5)  
+```
+
+Serve a identificare i geni più “affidabili” nel loro cambiamento di espressione tra i due gruppi
+
+### Ordino per valore assoluto del log2FoldChange in ordine decrescente e vissualizzo i 5 più significativi:
+
+```{r}
+resFC <- res[order(abs(res$log2FoldChange), decreasing = TRUE), ]
+head(resFC, 5)
+```
+
+I primi geni avranno la maggiore differenza di espressione tra i gruppi
+
+### Salvo risultati:
+
+```{r}
+write.csv(as.data.frame(res), file = "DESeq2_Project.csv")
+```
+
+## 3. Plots e Countplot:
+
+### MA plot
+
+```{r}
+plotMA(res, ylim = c(-6, 6), main = "Squamoso vs Adenocarcinoma")
+```
+
+### Countplot per il gene più significativo:
+
+```{r}
+genes <- which.min(res$padj)
+plotCounts(dds, gene = genes, intgroup = "subtype")
+```
+
+Grafico che mostra i conteggi di espressione normalizzati di il gene piu significativo per ciascun campione, divisi per gruppo.
+
+## 4. PCA colorata per subtype
+
+PCA serve per esplorare la variabilità globale, verificare se i gruppi Squamous e Adenocarcinoma mostrano separazione naturale basata sull’espressione genica.
+
+### Preparazzione per PCA:
+
+```{r}
+library("ggplot2")
+```
+
+### Trasformazione con vst:
+
+```{r}
+vsd <- vst(dds, blind = FALSE)
+```
+
+Trasformazione stabilizzante della varianza, fa i conteggi RNA-seq più simili a dati gaussiani.
+
+### PCA con plotPCA:
+
+```{r}
+pcaData <- plotPCA(vsd, intgroup = "subtype", returnData = TRUE)
+percentVar <- round(100 * attr(pcaData, "percentVar"))
+```
+
+### Visualizzazione PCA:
+
+```{r}
+ggplot(pcaData, aes(x = PC1, y = PC2, color = subtype)) +
+  geom_point(size = 3) +
+  xlab(paste0("PC1: ", percentVar[1], "% variance")) +
+  ylab(paste0("PC2: ", percentVar[2], "% variance")) +
+  coord_fixed(2/3) +
+  ggtitle("PCA: Squamous vs Adenocarcinoma")
+```
+
+Uso coord_fixed(ratio = 2/3) + questo rende l’asse x 2 volte più largo di y
+
+## 5. Heatmap dei 20 geni più espressi
+
+### Carico la libreria per la heatmap:
+
+```{r}
+library("pheatmap")
+```
+
+### Seleziono i 20 geni con espressione media più alta:
+
+```{r}
+select <- order(rowMeans(counts(dds, normalized = TRUE)), decreasing = TRUE)[1:20]
+```
+
+### Preparo le annotazioni per le colonne subtype:
+
+```{r}
+df <- as.data.frame(colData(dds)[, "subtype", drop = FALSE])
+```
+
+### Creo la heatmap dei 20 geni più espressi con tutti i campioni in un PDF:
+
+```{r}
+pdf("heatmap_top20.pdf", width = 50, height = 8)
+pheatmap(assay(vsd)[select,],
+         fontsize_row = 10,
+         fontsize_col =6,
+         cluster_rows = FALSE,       #non faccio clustering dei geni
+         show_rownames = TRUE,      
+         cluster_cols = FALSE,       #non faccio clustering dei campioni
+         annotation_col = df)        #mostro i gruppi (subtype)
+dev.off()
+```
+
+## 6. Heatmap dei geni differenzialmente espressi (DEGs):
+
+### Seleziono i geni differenzialmente espressi (DEGs):
+
+```{r}
+sig <- res[which( abs(res[,"log2FoldChange"])>1 & res[,"padj"]<=0.05),]
+```
+
+### Ordina i DEGs per significatività crescente (padj)
+
+```{r}
+top_sig <- head(sig[order(sig$padj), ], 100)
+```
+
+### Creo la heatmap dei geni differenzialmente espressi(7577) con tutti i campioni(299) in un PDF:
+
+```{r}
+pdf("heatmap_DEGs.pdf", width = 40, height = 200)
+pheatmap(assay(vsd)[rownames(sig), ],
+         cluster_rows = TRUE,
+         cluster_cols = TRUE,
+         show_rownames = TRUE,       
+         annotation_col = df,
+         fontsize_row = 2,
+         fontsize_col = 4)
+dev.off()
+```
+
+## 7. Enrichment Analyses
+
+### Carico le librerie:
+
+```{r}
+library(clusterProfiler)
+library(org.Hs.eg.db)
+library(ReactomePA)
+library(enrichplot)
+```
+
+### Preparo la lista dei geni DEGs (list of significant genes):
+
+```{r}
+sig$ENSEMBL <- sub("\\..*", "", rownames(sig))
+gene_list <- bitr(sig$ENSEMBL, fromType="ENSEMBL",
+                  toType= c("ENSEMBL", "SYMBOL","ENTREZID"),
+                  OrgDb=org.Hs.eg.db)
+```
+
+Noi abbiamo gli ID così: ENSG00000198804.2, ma org.Hs.eg.db riconosce solo: ENSG00000198804 per quello sig$ENSEMBL <- sub("\\..*", "", rownames(sig))
+
+### Per sapere quanti campioni sono stati mappati:
+
+```{r}
+length(sig$ENSEMBL)   #Per sapere i campioni totali
+nrow(gene_list)       #Per sapere quanti campioni sono mappati
+```
+
+### Preparo la lista di background (res) (universal gene list):
+
+```{r}
+res$ENSEMBL <- sub("\\..*", "", rownames(res))
+universe_list <- bitr(res$ENSEMBL, fromType="ENSEMBL",
+                      toType=c("ENSEMBL", "SYMBOL","ENTREZID"),
+                      OrgDb=org.Hs.eg.db)
+```
+
+### Per sapere quanti campioni sono stati mappati:
+
+```{r}
+length(res$ENSEMBL)   #Per sapere i campioni totali
+nrow(universe_list)       #Per sapere quanti campioni sono mappati
+```
+
+
+### Eseguo enrichment GO (gene ontology enrichment analysis) Biological Process:
+
+```{r}
+ego_bp <- enrichGO(gene = gene_list$ENTREZID,
+                   universe = universe_list$ENTREZID,
+                   OrgDb = org.Hs.eg.db,
+                   ont = "BP",
+                   pAdjustMethod = "BH",
+                   pvalueCutoff = 0.05)
+
+```
+### Eseguo enrichment GO (Cellular Component):
+
+```{r}
+ego_cc <- enrichGO(gene = gene_list$ENTREZID,
+                   universe = universe_list$ENTREZID,
+                   OrgDb = org.Hs.eg.db,
+                   ont = "CC",
+                   pAdjustMethod = "BH",
+                   pvalueCutoff = 0.05)
+
+```
+
+### Eseguo enrichment GO (Molecular Function):
+
+```{r}
+ego_mf <- enrichGO(gene = gene_list$ENTREZID,
+                   universe = universe_list$ENTREZID,
+                   OrgDb = org.Hs.eg.db,
+                   ont = "MF",
+                   pAdjustMethod = "BH",
+                   pvalueCutoff = 0.05)
+```
+
+### Have a look at the objects:
+
+```{r}
+ego_cc@result
+ego_bp@result
+ego_mf@result
+```
+
+### Faccio un PDF con i risultati:
+
+```{r}
+pdf("GO_enrichment_barplots.pdf", width = 15, height = 10)
+barplot(ego_bp, showCategory = 20,
+        title = "GO Enrichment: Biological Process")
+
+barplot(ego_cc, showCategory = 20,
+        title = "GO Enrichment: Cellular Component")
+
+barplot(ego_mf, showCategory = 20,
+        title = "GO Enrichment: Molecular Function")
+
+dev.off()
+```
+
+### Converto ENSEMBL in SYMBOL nei risultati GO:
+
+```{r}
+egoBP2 <- setReadable(ego_bp, OrgDb = org.Hs.eg.db)
+egoCC2 <- setReadable(ego_cc, OrgDb = org.Hs.eg.db)
+egoMF2 <- setReadable(ego_mf, OrgDb = org.Hs.eg.db)
+```
+
+### Estraggo la tabella dei risultati arricchiti:
+
+```{r}
+egoBP2_table <- egoBP2@result
+egoCC2_table <- egoCC2@result
+egoMF2_table <- egoMF2@result
+```
+
+### Salvo in file txt tab-delimited (senza virgolette, senza rownames):
+
+```{r}
+write.table(egoBP2_table,
+            file = "./GO_BP_enrichment.txt",
+            sep = "\t",
+            row.names = FALSE,
+            quote = FALSE)
+
+write.table(egoCC2_table,
+            file = "./GO_CC_enrichment.txt",
+            sep = "\t", row.names = FALSE, quote = FALSE)
+
+write.table(egoMF2_table,
+            file = "./GO_MF_enrichment.txt",
+            sep = "\t", 
+            row.names = FALSE, 
+            quote = FALSE)
+
+```
+
+### Preparo input per REVIGO:
+
+```{r}
+BP_rev <- ego_bp[, c("ID", "p.adjust")]
+write.table(file = "./GO_BP_revigo_input.txt",
+            BP_rev,
+            sep = "\t",
+            row.names = FALSE,
+            col.names = FALSE,
+            quote = FALSE)
+
+CC_rev <- ego_cc[, c("ID", "p.adjust")]
+write.table(file = "./GO_CC_revigo_input.txt",
+            CC_rev,
+            sep = "\t",
+            row.names = FALSE,
+            col.names = FALSE,
+            quote = FALSE)
+
+MF_rev <- ego_mf[, c("ID", "p.adjust")]
+write.table(file = "./GO_MF_revigo_input.txt",
+            MF_rev,
+            sep = "\t",
+            row.names = FALSE,
+            col.names = FALSE,
+            quote = FALSE)
+
+```
+
+### Eseguo enrichment per pathway Reactome:
+
+```{r}
+egoReactome <- enrichPathway(
+  gene = gene_list[, "ENTREZID"],
+  universe = universe_list[, "ENTREZID"],
+  pvalueCutoff = 0.05,
+  pAdjustMethod = "BH",
+  readable = TRUE  # converte ENTREZID in simboli
+)
+```
+
+### Salvo il enrichment per pathway Reactome in file txt:
+
+```{r}
+write.table(
+  as.data.frame(egoReactome),
+  file = "./Reactome_enrichment_results.txt",
+  sep = "\t",
+  row.names = FALSE,
+  quote = FALSE
+)
+```
+
+## 8. Prepare GSEA input:
+
+### Preparo input per GSEA (named numeric vector: log2FC con nomi dei geni):
+
+```{r}
+x.gsea <- res[order(res$log2FoldChange, decreasing = TRUE), "log2FoldChange"]
+```
+
+### Assegno nomi simbolici ai geni:
+
+```{r}
+names(x.gsea) <- universe_list[order(res$log2FoldChange, decreasing = TRUE), "SYMBOL"]
+```
+
+### Rimuovo i NA (geni non mappati):
+
+```{r}
+x.gsea <- x.gsea[!is.na(names(x.gsea))]
+```
+
+### Eseguo GSEA su tutti i termini GO:
+
+```{r}
+gseaALL <- gseGO(
+  gene = x.gsea,
+  OrgDb = org.Hs.eg.db,
+  ont = "ALL",               # include BP, CC, MF
+  pAdjustMethod = "none",   
+  pvalueCutoff = 0.05,
+  keyType = "SYMBOL",       # perché x.gsea ha i nomi simbolici
+  by = "fgsea"              # metodo veloce e robusto
+)
+```
+
+### Visualizzo i risultati:
+
+```{r}
+gseaALL@result
+```
+
+### Plotto il primo gene set arricchito in un PDF:
+
+```{r}
+pdf("GSEA_plot_top1.pdf", width = 8, height = 6)
+gseaplot2(gseaALL, geneSetID = 1)
+dev.off()
+```
+
+### Salvo tutti i risultati su un file:
+
+```{r}
+write.table(as.data.frame(gseaALL@result),
+            file = "GSEA_GO_ALL_results.txt",
+            sep = "\t", row.names = FALSE, quote = FALSE)
+```
+
+## 9. Unsupervised Learning (clustering)
+
+### Seleziono espressione dei top 100 DEGs (già salvati in top_sig):
+
+```{r}
+expr_data <- t(assay(vsd)[rownames(top_sig), ])
+```
+
+### Calcolo distanza euclidea tra campioni:
+
+```{r}
+d <- dist(expr_data, method = "euclidean")
+```
+
+### Clustering gerarchico:
+
+```{r}
+hc <- hclust(d, method = "average")
+```
+
+### Visualizzo il dendrogramma in un documento PDF:
+
+```{r}
+pdf("dendrogramma_cluster.pdf", width = 30, height = 10)
+plot(hc, main = "Clustering gerarchico dei campioni", cex = 0.5)
+dev.off()
+```
+
+### Confronto con i gruppi:
+
+```{r}
+clusters <- cutree(hc, k = 2)
+table(Cluster = clusters, Subtype = colData(dds)$subtype)
+```
+
+## 10. Supervised learning: k-NN (k-nearest neighbors):
+
+### Carico libreria:
+
+```{r}
+library(class)
+``` 
+
+### Preparo i dati, trasposta dell’espressione dei top 100 DEGs:
+
+```{r}
+expr_data <- t(assay(vsd)[rownames(top_sig), ])
+```
+
+### Etichette di classe:
+
+```{r}
+labels <- colData(dds)$subtype
+```
+
+### Suddivido in train e test (70/30):
+
+```{r}
+set.seed(123)
+train_idx <- sample(1:nrow(expr_data), 0.7 * nrow(expr_data))
+train_data <- expr_data[train_idx, ]
+test_data  <- expr_data[-train_idx, ]
+train_labels <- labels[train_idx]
+test_labels  <- labels[-train_idx]
+```
+
+### Applico kNN con k = 3:
+
+```{r}
+predictions <- knn(train = train_data, test = test_data, cl = train_labels, k = 3)
+```
+
+### Valuto l'accuratezza:
+
+```{r}
+table(Predicted = predictions, Actual = test_labels)
+```
+
+### Enrichr:
+```{r}
+top_sig$ENSEMBL <- sub("\\..*", "", rownames(top_sig))
+
+top_symbols <- bitr(top_sig$ENSEMBL, fromType="ENSEMBL",
+                    toType="SYMBOL", OrgDb="org.Hs.eg.db")
+
+# Scrivo i simboli in un file .txt da usare su Enrichr
+writeLines(top_symbols$SYMBOL, "top100_genes_for_Enrichr.txt")
+```
+
+
